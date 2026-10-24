@@ -38,10 +38,10 @@ A lightweight, battery-friendly background wallpaper slideshow tool for **Window
 On first launch, `config.txt` is created automatically (based on `config.default.txt`):
 
 ```ini
-# Path to your pictures folder (default: %USERPROFILE%\Pictures):
-PicturesPath=C:\Users\YourUsername\Pictures
+# Pfad zum Bilderordner (Standard: Ordner "Wallpapers" im Programmverzeichnis):
+PicturesPath=Wallpapers
 
-# Display duration per picture in seconds:
+# Anzeigedauer pro Bild in Sekunden:
 IntervalSeconds=30
 
 # Shuffle images randomly (true/false):

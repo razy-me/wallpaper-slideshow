@@ -3,8 +3,8 @@
 # ==========================================
 
 # Pfad zum Bilderordner (nur Dateien direkt in diesem Ordner):
-# Standardmaessig: %USERPROFILE%\Pictures
-PicturesPath=
+# Standardmaessig: Ordner "Wallpapers" im Programmverzeichnis
+PicturesPath=Wallpapers
 
 # Anzeigedauer pro Bild in Sekunden (z. B. 30):
 IntervalSeconds=30

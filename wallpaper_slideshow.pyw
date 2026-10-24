@@ -105,7 +105,8 @@ class SYSTEM_POWER_STATUS(ctypes.Structure):
         ('BatteryFullLifeTime', wintypes.DWORD),
     ]
 
-DEFAULT_PICTURES = os.path.join(os.path.expanduser("~"), "Pictures")
+WALLPAPERS_DIR = os.path.join(APP_DIR, "Wallpapers")
+DEFAULT_PICTURES = WALLPAPERS_DIR if os.path.exists(WALLPAPERS_DIR) else os.path.join(os.path.expanduser("~"), "Pictures")
 
 DEFAULT_CONFIG = {
     "PicturesPath": DEFAULT_PICTURES,
@@ -166,6 +167,9 @@ def load_config():
                         k, v = line.split("=", 1)
                         k, v = k.strip(), v.strip()
                         if k == "PicturesPath" and v:
+                            # Relative Pfade (wie "Wallpapers") relativ zum Programmverzeichnis aufloesen
+                            if not os.path.isabs(v):
+                                v = os.path.normpath(os.path.join(APP_DIR, v))
                             cfg["PicturesPath"] = v
                         elif k == "IntervalSeconds":
                             try: cfg["IntervalSeconds"] = max(3, int(v))
