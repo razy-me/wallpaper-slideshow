@@ -1,46 +1,57 @@
 """
-Wallpaper Slideshow für Windows (Todes optimiert & Ultra-Energieeffizient)
+Wallpaper Slideshow für Windows (Native Diashow & Ultra-Energieeffizient)
 ========================================================================
-1. 0.0% CPU im Leerlauf:
+1. Echte Windows-Diashow mit hardwarebeschleunigtem Smooth-Fade (Crossfade):
+   Nutzt das native Windows COM-Interface IDesktopWallpaper (SetSlideshow / AdvanceSlideshow).
+   Windows bleibt dauerhaft im Status "Diashow" und blendet jedes Bild butterweich über.
+
+2. Volle Anpassbarkeit & freies Intervall:
+   Erlaubt beliebige Sekunden-Intervalle (z. B. 10s, 15s, 30s) ohne die 1-Minuten-
+   Mindestgrenze der Windows-GUI.
+
+3. 0.0% CPU im Leerlauf:
    Reines Win32-Event-Driven-Design ohne Polling-Schleife (PumpMessages/GetMessage).
    Thread verweilt zu 100% im blockierenden Kernel-Wait -> CPU-Kerne verbleiben
    in tiefsten Package C-States (C8-C10).
 
-2. Windows 11 EcoQoS (Effizienzmodus):
+4. Windows 11 EcoQoS (Effizienzmodus):
    Aktiviert PROCESS_POWER_THROTTLING_EXECUTION_SPEED & IDLE_PRIORITY_CLASS.
    Windows pinnt den Prozess exklusiv auf sparsame E-Cores (Efficiency Cores)
    und verhindert CPU-Takt-Spikes (Turbo Boost) beim Bildwechsel.
    Im Windows Task-Manager als grünes Effizienz-Blatt erkennbar!
 
-3. Timer-Coalescing (SetCoalescableTimer mit 2000ms Toleranz):
+5. Timer-Coalescing (SetCoalescableTimer mit 2000ms Toleranz):
    Windows bündelt den Timer-Interrupt mit anderen System-Wakeups,
    sodass keine isolierten CPU-Aufwachzyklen provoziert werden.
 
-4. Display-Off Standby (GUID_CONSOLE_DISPLAY_STATE):
+6. Display-Off Standby (GUID_CONSOLE_DISPLAY_STATE):
    Schaltet sich das Display per Windows-Energieplan ab, stoppt der Timer
    augenblicklich. Null Wakeups und kein Wallpaper-Wechsel bei schwarzem Bildschirm.
 
-5. Bildschirmsperre-Pause (WTSRegisterSessionNotification):
+7. Bildschirmsperre-Pause (WTSRegisterSessionNotification):
    Pausiert sofort bei Win+L oder automatischer Sperre.
 
-6. Vollbild- & Gaming-Schutz (SHQueryUserNotificationState):
+8. Vollbild- & Gaming-Schutz (SHQueryUserNotificationState):
    Keine Bildwechsel während D3D-Vollbildspielen oder Präsentationen.
 
-7. Intelligente Windows-Stromsparmodus-Erkennung (GetSystemPowerStatus):
+9. Intelligente Windows-Stromsparmodus-Erkennung (GetSystemPowerStatus):
    Erkennt den Windows-Akkusparmodus. Kann optional das Weiterschalten
    vollständig pausieren, um den letzten Prozent Akku zu schützen.
 
-8. Minimaler RAM-Footprint:
-   Direktes Hardware-Compositing via DWM (kein Pillow/OpenCV/Canvas-Overhead).
-   Aggressiver Working-Set-Trim (EmptyWorkingSet) hält den RAM bei nur ~12-18 MB.
+10. Windows 11 Virtual-Desktop-Auto-Fix:
+    Bereinigt automatisch eventuelle sperrende Wallpaper-Einträge unter
+    VirtualDesktops, die Windows 11 sonst fehlerhaft auf "Bild" zurückwerfen würden.
+
+11. Minimaler RAM-Footprint:
+    Direktes Hardware-Compositing via DWM (kein Pillow/OpenCV/Canvas-Overhead).
+    Aggressiver Working-Set-Trim (EmptyWorkingSet) hält den RAM bei nur ~12-18 MB.
 """
 
 import os
 import sys
 import time
-import random
 import ctypes
-from ctypes import wintypes
+from ctypes import wintypes, c_void_p, HRESULT, POINTER, WINFUNCTYPE, c_int, c_uint, c_wchar_p
 import winreg
 
 import win32gui
@@ -56,14 +67,10 @@ CONFIG_FILE = os.path.join(APP_DIR, "config.txt")
 ICON_FILE = os.path.join(APP_DIR, "app_icon.ico")
 RUN_REG_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
 APP_REG_NAME = "WallpaperSlideshow"
-MUTEX_NAME = "WallpaperSlideshow_SingleInstance_vUltra"
+MUTEX_NAME = "WallpaperSlideshow_SingleInstance_vNativeCOM"
 
 TRAY_MSG_ID = win32con.WM_USER + 42
 TIMER_ID = 1
-
-SPI_SETDESKWALLPAPER = 0x0014
-SPIF_UPDATEINIFILE = 0x01
-SPIF_SENDCHANGE = 0x02
 
 # WTS Session Notifications (Sperren / Entsperren)
 WM_WTSSESSION_CHANGE = 0x02B1
@@ -88,6 +95,19 @@ GUID_CONSOLE_DISPLAY_STATE = GUID(
     0x6FE69556, 0x704A, 0x47A0, (wintypes.BYTE * 8)(0x8F, 0x24, 0xC2, 0x8D, 0x93, 0x6F, 0xDA, 0x47)
 )
 
+CLSID_DesktopWallpaper = GUID(
+    0xC2CF3110, 0x460E, 0x4fc1, (wintypes.BYTE * 8)(0xB9, 0xD0, 0x8A, 0x1C, 0x0C, 0x9C, 0xC4, 0xBD)
+)
+IID_IDesktopWallpaper = GUID(
+    0xB92B56A9, 0x8B55, 0x4E14, (wintypes.BYTE * 8)(0x9A, 0x89, 0x01, 0x99, 0xBB, 0xB6, 0xF9, 0x3B)
+)
+IID_IShellItem = GUID(
+    0x43826D1E, 0xE718, 0x42EE, (wintypes.BYTE * 8)(0xBC, 0x55, 0xA1, 0xE2, 0x61, 0xC3, 0x7B, 0xFE)
+)
+IID_IShellItemArray = GUID(
+    0xB63EA76D, 0x1F85, 0x456F, (wintypes.BYTE * 8)(0xA1, 0x9C, 0x48, 0x15, 0x9E, 0xFA, 0x85, 0x8B)
+)
+
 class POWERBROADCAST_SETTING(ctypes.Structure):
     _fields_ = [
         ('PowerSetting', GUID),
@@ -105,23 +125,217 @@ class SYSTEM_POWER_STATUS(ctypes.Structure):
         ('BatteryFullLifeTime', wintypes.DWORD),
     ]
 
-WALLPAPERS_DIR = os.path.join(APP_DIR, "Wallpapers")
-DEFAULT_PICTURES = WALLPAPERS_DIR if os.path.exists(WALLPAPERS_DIR) else os.path.join(os.path.expanduser("~"), "Pictures")
-
 DEFAULT_CONFIG = {
-    "PicturesPath": DEFAULT_PICTURES,
-    "IntervalSeconds": 30,
+    "PicturesPath": "Wallpapers",
+    "IntervalSeconds": 15,
     "Shuffle": True,
-    "Cooldown": 9,
+    "PauseOnFullscreen": True,
     "PauseOnBatterySaver": False,
 }
 
 VALID_EXTENSIONS = ('.png', '.jpg', '.jpeg', '.bmp', '.webp', '.jfif')
 
+ole32 = ctypes.windll.ole32
+shell32 = ctypes.windll.shell32
+kernel32 = ctypes.windll.kernel32
+user32 = ctypes.windll.user32
+
+try:
+    user32.SetCoalescableTimer.argtypes = [wintypes.HWND, wintypes.UINT, wintypes.UINT, ctypes.c_void_p, wintypes.ULONG]
+    user32.SetCoalescableTimer.restype = wintypes.UINT
+except Exception:
+    pass
+
+try:
+    user32.SetTimer.argtypes = [wintypes.HWND, wintypes.UINT, wintypes.UINT, ctypes.c_void_p]
+    user32.SetTimer.restype = wintypes.UINT
+except Exception:
+    pass
+
+try:
+    user32.KillTimer.argtypes = [wintypes.HWND, wintypes.UINT]
+    user32.KillTimer.restype = wintypes.BOOL
+except Exception:
+    pass
+
+try:
+    kernel32.GetSystemPowerStatus.argtypes = [ctypes.c_void_p]
+    kernel32.GetSystemPowerStatus.restype = wintypes.BOOL
+except Exception:
+    pass
+
+try:
+    shell32.SHQueryUserNotificationState.argtypes = [ctypes.c_void_p]
+    shell32.SHQueryUserNotificationState.restype = HRESULT
+except Exception:
+    pass
+
+try:
+    ole32.CoTaskMemFree.argtypes = [ctypes.c_void_p]
+    ole32.CoTaskMemFree.restype = None
+except Exception:
+    pass
+
+
+def release_com(ptr):
+    """Gibt einen COM-Interface-Pointer sauber frei."""
+    if ptr and ptr.value:
+        try:
+            vtable = ctypes.cast(ptr, POINTER(POINTER(c_void_p))).contents
+            release_fn = WINFUNCTYPE(c_uint, c_void_p)(vtable[2])
+            release_fn(ptr)
+        except Exception:
+            pass
+
+
+class DesktopWallpaperManager:
+    """Kapselt das native Windows Shell COM-Interface IDesktopWallpaper.
+
+    Stabilität: Das COM-Objekt lebt im Explorer-Prozess. Stürzt explorer.exe ab oder
+    wird neu gestartet, wird das Objekt ungültig (RPC_E_DISCONNECTED etc.). In diesem
+    Fall wird es automatisch neu erzeugt (reconnect), ohne dass das Tool neu starten muss.
+    """
+
+    def __init__(self):
+        ole32.CoInitialize(None)
+        self.p_obj = c_void_p()
+        self._connect()
+
+    def _connect(self):
+        """Erzeugt (oder erneuert) die COM-Instanz und bindet die VTable-Methoden."""
+        if self.p_obj and self.p_obj.value:
+            release_com(self.p_obj)
+        self.p_obj = c_void_p()
+        hr = ole32.CoCreateInstance(
+            ctypes.byref(CLSID_DesktopWallpaper), None, 1 | 4,
+            ctypes.byref(IID_IDesktopWallpaper), ctypes.byref(self.p_obj)
+        )
+        if hr != 0 or not self.p_obj.value:
+            self.p_obj = c_void_p()
+            return False
+
+        vt = ctypes.cast(self.p_obj, POINTER(POINTER(c_void_p))).contents
+        # Out-Strings als c_void_p binden, damit sie per CoTaskMemFree freigegeben werden können
+        self._GetWallpaper = WINFUNCTYPE(HRESULT, c_void_p, wintypes.LPCWSTR, POINTER(c_void_p))(vt[4])
+        self._GetMonitorDevicePathAt = WINFUNCTYPE(HRESULT, c_void_p, c_uint, POINTER(c_void_p))(vt[5])
+        self._GetMonitorDevicePathCount = WINFUNCTYPE(HRESULT, c_void_p, POINTER(c_uint))(vt[6])
+        self._SetSlideshow = WINFUNCTYPE(HRESULT, c_void_p, c_void_p)(vt[12])
+        self._SetSlideshowOptions = WINFUNCTYPE(HRESULT, c_void_p, c_int, c_uint)(vt[14])
+        self._AdvanceSlideshow = WINFUNCTYPE(HRESULT, c_void_p, wintypes.LPCWSTR, c_int)(vt[16])
+        return True
+
+    @staticmethod
+    def clean_virtual_desktops_blockers():
+        """Behebt den Windows 11 Virtual-Desktop-Bug, der die Diashow auf 'Bild' sperrt."""
+        base_key = r"Software\Microsoft\Windows\CurrentVersion\Explorer\VirtualDesktops\Desktops"
+        try:
+            with winreg.OpenKey(winreg.HKEY_CURRENT_USER, base_key, 0, winreg.KEY_READ) as k:
+                n_sub = winreg.QueryInfoKey(k)[0]
+                subkeys = [winreg.EnumKey(k, i) for i in range(n_sub)]
+        except OSError:
+            return
+        for sub in subkeys:
+            try:
+                with winreg.OpenKey(winreg.HKEY_CURRENT_USER, f"{base_key}\\{sub}", 0, winreg.KEY_SET_VALUE) as sk:
+                    winreg.DeleteValue(sk, "Wallpaper")
+            except OSError:
+                pass
+
+    def setup_slideshow(self, folder_path, shuffle=True):
+        """Aktiviert die native Windows-Diashow auf dem Zielordner."""
+        abs_path = os.path.abspath(folder_path)
+        if not os.path.isdir(abs_path):
+            return False
+        if not (self.p_obj and self.p_obj.value) and not self._connect():
+            return False
+
+        self.clean_virtual_desktops_blockers()
+
+        # Registry-Status auf Diashow (2) setzen
+        try:
+            with winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Software\Microsoft\Windows\CurrentVersion\Explorer\Wallpapers", 0, winreg.KEY_SET_VALUE) as k:
+                winreg.SetValueEx(k, "BackgroundType", 0, winreg.REG_DWORD, 2)
+                winreg.SetValueEx(k, "SlideshowSourceDirectoriesSet", 0, winreg.REG_DWORD, 1)
+        except OSError:
+            pass
+
+        p_item = c_void_p()
+        p_array = c_void_p()
+        ok = False
+        try:
+            if shell32.SHCreateItemFromParsingName(abs_path, None, ctypes.byref(IID_IShellItem), ctypes.byref(p_item)) != 0:
+                return False
+            if shell32.SHCreateShellItemArrayFromShellItem(p_item, ctypes.byref(IID_IShellItemArray), ctypes.byref(p_array)) != 0:
+                return False
+            self._SetSlideshow(self.p_obj, p_array)
+            # Interner Windows-Timer auf 1 Tag, damit unser eigener Coalescing-Timer exakt taktet
+            self._SetSlideshowOptions(self.p_obj, 1 if shuffle else 0, 86400000)
+            ok = True
+        except OSError:
+            ok = False
+        finally:
+            release_com(p_array)
+            release_com(p_item)
+        return ok
+
+    def _try_advance(self):
+        if not (self.p_obj and self.p_obj.value):
+            return False
+        try:
+            self._AdvanceSlideshow(self.p_obj, None, 0)
+            return True
+        except OSError:
+            return False
+
+    def advance(self, folder_path=None, shuffle=True):
+        """Schaltet mit nativer Windows-Crossfade-Überblendung zum nächsten Bild.
+
+        Eskalationsstufen (Self-Healing):
+          1. Direktes AdvanceSlideshow
+          2. Diashow neu setzen (Windows hat Modus verloren) und erneut advancen
+          3. COM-Objekt neu verbinden (Explorer wurde neu gestartet) und alles wiederholen
+        """
+        if self._try_advance():
+            return True
+        if folder_path and self.setup_slideshow(folder_path, shuffle) and self._try_advance():
+            return True
+        if self._connect() and folder_path and self.setup_slideshow(folder_path, shuffle):
+            return self._try_advance()
+        return False
+
+    def get_current_wallpaper(self):
+        """Gibt den Pfad des aktuellen Hintergrundbildes zurück (ohne Speicherleck)."""
+        if not (self.p_obj and self.p_obj.value):
+            return ""
+        mid = c_void_p()
+        wp = c_void_p()
+        try:
+            self._GetMonitorDevicePathAt(self.p_obj, 0, ctypes.byref(mid))
+            if not mid.value:
+                return ""
+            self._GetWallpaper(self.p_obj, ctypes.wstring_at(mid.value), ctypes.byref(wp))
+            return ctypes.wstring_at(wp.value) if wp.value else ""
+        except OSError:
+            return ""
+        finally:
+            # COM-allokierte Strings müssen explizit freigegeben werden
+            if mid.value:
+                ole32.CoTaskMemFree(mid)
+            if wp.value:
+                ole32.CoTaskMemFree(wp)
+
+    def cleanup(self):
+        release_com(self.p_obj)
+        self.p_obj = c_void_p()
+        try:
+            ole32.CoUninitialize()
+        except Exception:
+            pass
+
+
 def apply_process_eco_mode():
     """Aktiviert Windows 11 EcoQoS (Effizienzmodus) und Idle-Priorität."""
     try:
-        kernel32 = ctypes.windll.kernel32
         kernel32.GetCurrentProcess.restype = wintypes.HANDLE
         kernel32.SetProcessInformation.argtypes = [wintypes.HANDLE, wintypes.DWORD, ctypes.c_void_p, wintypes.DWORD]
         kernel32.SetProcessInformation.restype = wintypes.BOOL
@@ -144,15 +358,48 @@ def apply_process_eco_mode():
     except Exception:
         pass
 
+
 def is_battery_saver_active():
     """Prüft, ob der Windows-Stromsparmodus aktuell aktiv ist."""
     try:
         sps = SYSTEM_POWER_STATUS()
-        if ctypes.windll.kernel32.GetSystemPowerStatus(ctypes.byref(sps)):
+        if kernel32.GetSystemPowerStatus(ctypes.byref(sps)):
             return sps.SystemStatusFlag == 1
     except Exception:
         pass
     return False
+
+
+def is_user_busy_or_fullscreen():
+    """Prüft, ob der Nutzer im Vollbild-Spiel oder einer Präsentation ist."""
+    try:
+        state = ctypes.c_int()
+        if shell32.SHQueryUserNotificationState(ctypes.byref(state)) == 0:
+            # 3 = QUNS_RUNNING_D3D_FULL_SCREEN, 4 = QUNS_PRESENTATION_MODE
+            return state.value in (3, 4)
+    except Exception:
+        pass
+    return False
+
+
+def resolve_pictures_path(raw_path):
+    """Löst relative Pfade relativ zum Programmverzeichnis auf."""
+    if not raw_path:
+        raw_path = "Wallpapers"
+    if not os.path.isabs(raw_path):
+        resolved = os.path.normpath(os.path.join(APP_DIR, raw_path))
+    else:
+        resolved = os.path.normpath(raw_path)
+
+    if os.path.exists(resolved):
+        return resolved
+
+    # Fallback auf lokalen Wallpapers-Ordner oder Bilderordner des Nutzers
+    local_wallpapers = os.path.join(APP_DIR, "Wallpapers")
+    if os.path.exists(local_wallpapers):
+        return local_wallpapers
+    return os.path.join(os.path.expanduser("~"), "Pictures")
+
 
 def load_config():
     cfg = dict(DEFAULT_CONFIG)
@@ -167,18 +414,14 @@ def load_config():
                         k, v = line.split("=", 1)
                         k, v = k.strip(), v.strip()
                         if k == "PicturesPath" and v:
-                            # Relative Pfade (wie "Wallpapers") relativ zum Programmverzeichnis aufloesen
-                            if not os.path.isabs(v):
-                                v = os.path.normpath(os.path.join(APP_DIR, v))
                             cfg["PicturesPath"] = v
                         elif k == "IntervalSeconds":
                             try: cfg["IntervalSeconds"] = max(3, int(v))
                             except ValueError: pass
-                        elif k == "Cooldown":
-                            try: cfg["Cooldown"] = max(0, int(v))
-                            except ValueError: pass
                         elif k == "Shuffle":
                             cfg["Shuffle"] = v.lower() in ("true", "1", "yes")
+                        elif k == "PauseOnFullscreen":
+                            cfg["PauseOnFullscreen"] = v.lower() in ("true", "1", "yes")
                         elif k == "PauseOnBatterySaver":
                             cfg["PauseOnBatterySaver"] = v.lower() in ("true", "1", "yes")
         except Exception:
@@ -187,25 +430,27 @@ def load_config():
         save_config(cfg)
     return cfg
 
+
 def save_config(cfg):
     try:
         lines = [
             "# ==========================================",
             "# Wallpaper Slideshow Konfiguration",
             "# ==========================================",
-            "# Pfad zum Bilderordner (nur Dateien direkt in diesem Ordner):",
+            "# Pfad zum Bilderordner:",
+            "# Standardmaessig: Ordner 'Wallpapers' im Programmverzeichnis (portabel auf jedem PC)",
             f"PicturesPath={cfg.get('PicturesPath', DEFAULT_CONFIG['PicturesPath'])}",
             "",
-            "# Anzeigedauer pro Bild in Sekunden (z. B. 30):",
+            "# Anzeigedauer pro Bild in Sekunden (z. B. 15):",
             f"IntervalSeconds={cfg.get('IntervalSeconds', DEFAULT_CONFIG['IntervalSeconds'])}",
             "",
-            "# Bilder zufällig mischen (true/false):",
+            "# Bilder zufaellig mischen (true/false):",
             f"Shuffle={str(cfg.get('Shuffle', DEFAULT_CONFIG['Shuffle'])).lower()}",
             "",
-            "# Cooldown: Mindestanzahl anderer Bilder vor Wiederholung (z. B. 9):",
-            f"Cooldown={cfg.get('Cooldown', DEFAULT_CONFIG['Cooldown'])}",
+            "# Diashow automatisch pausieren, wenn ein Spiel oder eine Praesentation im Vollbild laeuft (true/false):",
+            f"PauseOnFullscreen={str(cfg.get('PauseOnFullscreen', DEFAULT_CONFIG['PauseOnFullscreen'])).lower()}",
             "",
-            "# Diashow automatisch anhalten, wenn Windows-Stromsparmodus aktiv ist (true/false):",
+            "# Diashow automatisch pausieren, wenn Windows im Akku-Stromsparmodus ist (true/false):",
             f"PauseOnBatterySaver={str(cfg.get('PauseOnBatterySaver', DEFAULT_CONFIG['PauseOnBatterySaver'])).lower()}",
             ""
         ]
@@ -213,6 +458,7 @@ def save_config(cfg):
             f.write("\n".join(lines))
     except Exception:
         pass
+
 
 def is_autostart_enabled():
     try:
@@ -223,6 +469,7 @@ def is_autostart_enabled():
         return False
     except Exception:
         return False
+
 
 def set_autostart(enable):
     try:
@@ -242,17 +489,6 @@ def set_autostart(enable):
     except Exception:
         pass
 
-def is_user_busy_or_fullscreen():
-    """Prüft, ob der Nutzer im Vollbild-Spiel oder einer Präsentation ist."""
-    try:
-        state = ctypes.c_int()
-        if ctypes.windll.shell32.SHQueryUserNotificationState(ctypes.byref(state)) == 0:
-            # 3 = QUNS_RUNNING_D3D_FULL_SCREEN, 4 = QUNS_PRESENTATION_MODE
-            return state.value in (3, 4)
-    except Exception:
-        pass
-    return False
-
 
 class SlideshowService:
     def __init__(self):
@@ -265,36 +501,31 @@ class SlideshowService:
         # Windows 11 EcoQoS (Effizienzmodus) direkt beim Start setzen
         apply_process_eco_mode()
 
-        self.config = load_config()
-
         # Mutex zur Verhinderung von Mehrfachstarts
         self.mutex = win32event.CreateMutex(None, False, MUTEX_NAME)
         if win32api.GetLastError() == winerror.ERROR_ALREADY_EXISTS:
             sys.exit(0)
 
-        self.playlist = []
-        self.current_idx = -1
-        self.recent_history = []
-        self.history_back_stack = []
+        self.config = load_config()
+        self.resolved_path = resolve_pictures_path(self.config.get("PicturesPath"))
+
+        # Native Desktop Wallpaper COM Manager initialisieren
+        self.wallpaper_mgr = DesktopWallpaperManager()
+
         self.is_paused = False
         self.is_locked = False
         self.is_display_off = False
         self.timer_active = False
+        self.is_shutting_down = False
         self.tick_count = 0
+        self.config_mtime = None
+        self.last_tip = None
         self.h_power_notify = None
 
         self.init_window_and_tray()
-        self.reload_playlist()
 
-        # Erstes Bild direkt setzen
-        if self.playlist:
-            if self.config.get("Shuffle", True):
-                self.current_idx = random.randint(0, len(self.playlist) - 1)
-            else:
-                self.current_idx = 0
-            first_pic = self.playlist[self.current_idx]
-            self.recent_history.append(first_pic)
-            self.apply_wallpaper(first_pic)
+        # Diashow in Windows initialisieren
+        self.init_slideshow()
 
         self.update_tray_tooltip()
         self.start_timer()
@@ -302,14 +533,31 @@ class SlideshowService:
         # Arbeitsspeicher auf das absolute Minimum trimmen
         self.trim_memory()
 
+    def init_slideshow(self):
+        """Richtet die native Windows-Diashow mit dem konfigurierten Ordner ein."""
+        self.resolved_path = resolve_pictures_path(self.config.get("PicturesPath"))
+        shuffle = self.config.get("Shuffle", True)
+        self.wallpaper_mgr.setup_slideshow(self.resolved_path, shuffle)
+
     def init_window_and_tray(self):
         def wnd_proc(hwnd, msg, wparam, lparam):
             try:
                 if msg == TRAY_MSG_ID:
                     if lparam == win32con.WM_RBUTTONUP:
                         self.show_tray_menu()
-                    elif lparam in (win32con.WM_LBUTTONDBLCLK, win32con.WM_LBUTTONUP):
+                    elif lparam == win32con.WM_LBUTTONUP:
+                        # Nur LBUTTONUP: verhindert Mehrfach-Wechsel bei Doppelklick (UP+DBLCLK+UP)
                         self.trigger_next_manually()
+                elif msg == self.wm_taskbar_created:
+                    # Explorer wurde neu gestartet -> Tray-Icon neu anlegen & COM neu verbinden
+                    try:
+                        win32gui.Shell_NotifyIcon(win32gui.NIM_ADD, self.nid)
+                    except Exception:
+                        pass
+                    self.wallpaper_mgr._connect()
+                    self.init_slideshow()
+                    self.update_tray_tooltip(force=True)
+                    return 0
                 elif msg == win32con.WM_TIMER and wparam == TIMER_ID:
                     self.on_timer_tick()
                     return 0
@@ -342,21 +590,23 @@ class SlideshowService:
                 elif msg in (win32con.WM_CLOSE, win32con.WM_DESTROY):
                     self.shutdown()
                     return 0
-            except Exception as e:
-                import traceback
-                traceback.print_exc()
+            except Exception:
+                pass
             return win32gui.DefWindowProc(hwnd, msg, wparam, lparam)
+
+        # Broadcast-Nachricht, die Windows nach einem Explorer-Neustart sendet
+        self.wm_taskbar_created = win32gui.RegisterWindowMessage("TaskbarCreated")
 
         wc = win32gui.WNDCLASS()
         wc.lpfnWndProc = wnd_proc
-        wc.lpszClassName = "WallpaperSlideshow_UltraHost_v8"
+        wc.lpszClassName = "WallpaperSlideshow_NativeHost_v9"
         try:
             win32gui.RegisterClass(wc)
         except Exception:
             pass
 
         self.msg_hwnd = win32gui.CreateWindow(
-            "WallpaperSlideshow_UltraHost_v8", "WallpaperSlideshowMsg",
+            "WallpaperSlideshow_NativeHost_v9", "WallpaperSlideshowMsg",
             0, 0, 0, 0, 0, 0, 0, 0, None
         )
 
@@ -368,13 +618,12 @@ class SlideshowService:
 
         # Bei Windows für Bildschirm-Status (Display On/Off) registrieren
         try:
-            u32 = ctypes.windll.user32
-            u32.RegisterPowerSettingNotification.argtypes = [wintypes.HANDLE, ctypes.c_void_p, wintypes.DWORD]
-            u32.RegisterPowerSettingNotification.restype = wintypes.HANDLE
-            u32.UnregisterPowerSettingNotification.argtypes = [wintypes.HANDLE]
-            u32.UnregisterPowerSettingNotification.restype = wintypes.BOOL
+            user32.RegisterPowerSettingNotification.argtypes = [wintypes.HANDLE, ctypes.c_void_p, wintypes.DWORD]
+            user32.RegisterPowerSettingNotification.restype = wintypes.HANDLE
+            user32.UnregisterPowerSettingNotification.argtypes = [wintypes.HANDLE]
+            user32.UnregisterPowerSettingNotification.restype = wintypes.BOOL
 
-            self.h_power_notify = u32.RegisterPowerSettingNotification(
+            self.h_power_notify = user32.RegisterPowerSettingNotification(
                 self.msg_hwnd, ctypes.byref(GUID_CONSOLE_DISPLAY_STATE), 0
             )
         except Exception:
@@ -407,34 +656,43 @@ class SlideshowService:
         if self.is_paused or self.is_locked or self.is_display_off:
             return
         self.stop_timer()
-        interval_ms = max(3000, int(self.config.get("IntervalSeconds", 30) * 1000))
+        interval_ms = max(3000, int(self.config.get("IntervalSeconds", 15) * 1000))
         # 2000ms Toleranz für Coalescing: Spart Akku, da Windows den Wakeup mit anderen Tasks bündelt
         try:
-            ctypes.windll.user32.SetCoalescableTimer(self.msg_hwnd, TIMER_ID, interval_ms, None, 2000)
+            user32.SetCoalescableTimer(self.msg_hwnd, TIMER_ID, interval_ms, None, 2000)
         except Exception:
-            ctypes.windll.user32.SetTimer(self.msg_hwnd, TIMER_ID, interval_ms, None)
+            user32.SetTimer(self.msg_hwnd, TIMER_ID, interval_ms, None)
         self.timer_active = True
 
     def stop_timer(self):
         if self.timer_active:
             try:
-                ctypes.windll.user32.KillTimer(self.msg_hwnd, TIMER_ID)
+                user32.KillTimer(self.msg_hwnd, TIMER_ID)
             except Exception:
                 pass
             self.timer_active = False
 
     def check_and_reload_config(self):
         """Liest config.txt im laufenden Betrieb neu ein und wendet Änderungen sofort an."""
-        old_interval = self.config.get("IntervalSeconds", 30)
+        # Nur parsen, wenn sich die Datei tatsächlich geändert hat (ein einziger stat()-Call)
+        try:
+            mtime = os.stat(CONFIG_FILE).st_mtime_ns
+        except OSError:
+            mtime = None
+        if mtime == self.config_mtime:
+            return
+        self.config_mtime = mtime
+
+        old_interval = self.config.get("IntervalSeconds", 15)
         old_path = self.config.get("PicturesPath", "")
         old_shuffle = self.config.get("Shuffle", True)
 
         new_config = load_config()
         self.config = new_config
 
-        # 1. Pfad aktualisieren
-        if new_config.get("PicturesPath") != old_path:
-            self.reload_playlist()
+        # 1. Pfad oder Shuffle aktualisieren
+        if new_config.get("PicturesPath") != old_path or new_config.get("Shuffle") != old_shuffle:
+            self.init_slideshow()
 
         # 2. Intervall aktualisieren
         if new_config.get("IntervalSeconds") != old_interval:
@@ -442,85 +700,63 @@ class SlideshowService:
 
         self.update_tray_tooltip()
 
-    def select_next_wallpaper(self):
-        """Wählt das nächste Bild aus – zufällig mit Cooldown oder sequentiell."""
-        if not self.playlist:
-            return None
-
-        total = len(self.playlist)
-        if not self.config.get("Shuffle", True) or total <= 1:
-            next_idx = (self.current_idx + 1) % total
-            return self.playlist[next_idx]
-
-        # Cooldown aus der Konfiguration (z. B. 9)
-        # Wenn weniger Bilder vorhanden sind als Cooldown+1, wird der Cooldown auf total - 1 begrenzt
-        target_cd = int(self.config.get("Cooldown", 9))
-        effective_cd = min(target_cd, max(0, total - 1))
-
-        # Die zuletzt gezeigten Bilder als blockiert markieren
-        blocked = set(self.recent_history[-effective_cd:]) if effective_cd > 0 else set()
-        
-        candidates = [p for p in self.playlist if p not in blocked]
-        if not candidates:
-            # Fallback falls alle Bilder im Cooldown waren
-            candidates = [p for p in self.playlist if p != (self.playlist[self.current_idx] if 0 <= self.current_idx < total else None)]
-            if not candidates:
-                candidates = self.playlist
-
-        return random.choice(candidates)
-
     def on_timer_tick(self):
         if self.is_paused or self.is_locked or self.is_display_off:
             return
 
-        self.tick_count += 1
-        # Nach jedem 3. Intervall die config.txt im Hintergrund automatisch neu einlesen
-        if self.tick_count % 3 == 0:
-            self.check_and_reload_config()
+        # config.txt bei jedem Tick per mtime prüfen (nahezu kostenlos, Änderungen greifen sofort)
+        self.check_and_reload_config()
 
         # Stromsparmodus-Prüfung
         if self.config.get("PauseOnBatterySaver", False) and is_battery_saver_active():
             self.update_tray_tooltip()
             return
+
         # Vollbild-Spiel / Präsentation Prüfung
-        if is_user_busy_or_fullscreen():
+        if self.config.get("PauseOnFullscreen", True) and is_user_busy_or_fullscreen():
+            self.update_tray_tooltip()
             return
 
-        next_pic = self.select_next_wallpaper()
-        if next_pic:
-            if 0 <= self.current_idx < len(self.playlist):
-                curr_pic = self.playlist[self.current_idx]
-                self.history_back_stack.append(curr_pic)
-                if len(self.history_back_stack) > 50:
-                    self.history_back_stack.pop(0)
+        # Bild mit nativer Windows-Crossfade-Überblendung weiterschalten
+        self.wallpaper_mgr.advance(self.resolved_path, self.config.get("Shuffle", True))
+        self.update_tray_tooltip()
+        self.trim_memory()
 
-            self.current_idx = self.playlist.index(next_pic)
-            self.recent_history.append(next_pic)
-            max_hist = max(50, int(self.config.get("Cooldown", 9)) * 2)
-            if len(self.recent_history) > max_hist:
-                self.recent_history = self.recent_history[-max_hist:]
+    def trigger_next_manually(self):
+        """Manueller Bildwechsel per Klick (mit sofortigem Smooth-Fade)."""
+        self.wallpaper_mgr.advance(self.resolved_path, self.config.get("Shuffle", True))
+        self.update_tray_tooltip()
+        self.start_timer()
 
-            self.apply_wallpaper(next_pic)
-            self.update_tray_tooltip()
-            self.trim_memory()
+    def toggle_pause(self):
+        self.is_paused = not self.is_paused
+        if self.is_paused:
+            self.stop_timer()
+        else:
+            self.start_timer()
+        self.update_tray_tooltip()
 
     def show_tray_menu(self):
         menu = win32gui.CreatePopupMenu()
 
-        win32gui.AppendMenu(menu, win32con.MF_STRING | win32con.MF_GRAYED, 0, "🖼 Wallpaper Slideshow")
+        win32gui.AppendMenu(menu, win32con.MF_STRING | win32con.MF_GRAYED, 0, "🖼 Wallpaper Slideshow (Diashow)")
         win32gui.AppendMenu(menu, win32con.MF_SEPARATOR, 0, "")
 
-        win32gui.AppendMenu(menu, win32con.MF_STRING, 1, "⏭  Nächstes Bild")
-        win32gui.AppendMenu(menu, win32con.MF_STRING, 2, "⏮  Vorheriges Bild")
+        win32gui.AppendMenu(menu, win32con.MF_STRING, 1, "⏭  Nächstes Bild (Weicher Übergang)")
 
         pause_text = "▶  Diashow fortsetzen" if self.is_paused else "⏸  Diashow pausieren"
         win32gui.AppendMenu(menu, win32con.MF_STRING, 3, pause_text)
         win32gui.AppendMenu(menu, win32con.MF_SEPARATOR, 0, "")
 
         win32gui.AppendMenu(menu, win32con.MF_STRING, 4, "📁  Bilderordner öffnen")
-        win32gui.AppendMenu(menu, win32con.MF_STRING, 5, "🔄  Bilder neu einlesen")
+        win32gui.AppendMenu(menu, win32con.MF_STRING, 5, "🔄  Diashow neu initialisieren")
         win32gui.AppendMenu(menu, win32con.MF_STRING, 6, "⚙  Einstellungen (config.txt)")
         win32gui.AppendMenu(menu, win32con.MF_SEPARATOR, 0, "")
+
+        # Vollbild-Spiele Option im Tray
+        is_fs_cfg = self.config.get("PauseOnFullscreen", True)
+        fs_flags = win32con.MF_STRING | (win32con.MF_CHECKED if is_fs_cfg else win32con.MF_UNCHECKED)
+        win32gui.AppendMenu(menu, fs_flags, 10, "🎮  Bei Vollbild-Spielen pausieren")
 
         # Stromsparmodus Option im Tray
         is_saver_cfg = self.config.get("PauseOnBatterySaver", False)
@@ -546,16 +782,14 @@ class SlideshowService:
 
         if cmd == 1:
             self.trigger_next_manually()
-        elif cmd == 2:
-            self.trigger_prev_manually()
         elif cmd == 3:
             self.toggle_pause()
         elif cmd == 4:
-            try: os.startfile(self.config["PicturesPath"])
+            try: os.startfile(self.resolved_path)
             except Exception: pass
         elif cmd == 5:
             self.check_and_reload_config()
-            self.reload_playlist()
+            self.init_slideshow()
             self.trigger_next_manually()
         elif cmd == 6:
             if not os.path.exists(CONFIG_FILE):
@@ -570,28 +804,33 @@ class SlideshowService:
             self.config["PauseOnBatterySaver"] = not is_saver_cfg
             save_config(self.config)
             self.update_tray_tooltip()
+        elif cmd == 10:
+            self.config["PauseOnFullscreen"] = not is_fs_cfg
+            save_config(self.config)
+            self.update_tray_tooltip()
 
-    def update_tray_tooltip(self):
+    def update_tray_tooltip(self, force=False):
         try:
-            count = len(self.playlist)
-            if count > 0 and 0 <= self.current_idx < count:
-                name = os.path.basename(self.playlist[self.current_idx])
-                idx_str = f"({self.current_idx + 1}/{count})"
-            else:
-                name = "Keine Bilder"
-                idx_str = "(0/0)"
+            curr_file = self.wallpaper_mgr.get_current_wallpaper()
+            name = os.path.basename(curr_file) if curr_file else "Wallpaper"
 
             status = ""
             if self.is_paused:
                 status = "[PAUSIERT] "
+            elif self.config.get("PauseOnFullscreen", True) and is_user_busy_or_fullscreen():
+                status = "[VOLLBILD] "
             elif self.config.get("PauseOnBatterySaver", False) and is_battery_saver_active():
                 status = "[STROMSPARMODUS] "
             elif self.is_display_off:
                 status = "[BILDSCHIRM AUS] "
 
-            tip = f"{status}Wallpaper {idx_str}\n{name}\nAlle {self.config['IntervalSeconds']}s"
+            tip = f"{status}Wallpaper Diashow\n{name}\nAlle {self.config.get('IntervalSeconds', 15)}s"
             if len(tip) > 63:
                 tip = tip[:60] + "..."
+
+            if not force and tip == self.last_tip:
+                return
+            self.last_tip = tip
 
             nid = (
                 self.msg_hwnd, 1,
@@ -602,106 +841,24 @@ class SlideshowService:
         except Exception:
             pass
 
-    def reload_playlist(self):
-        path = self.config.get("PicturesPath", DEFAULT_CONFIG["PicturesPath"])
-        current_file = self.playlist[self.current_idx] if (self.playlist and 0 <= self.current_idx < len(self.playlist)) else None
-        self.playlist = []
-        if os.path.exists(path):
-            try:
-                files = sorted([
-                    os.path.join(path, f)
-                    for f in os.listdir(path)
-                    if os.path.isfile(os.path.join(path, f))
-                    and f.lower().endswith(VALID_EXTENSIONS)
-                ])
-                self.playlist = files
-                if current_file and current_file in self.playlist:
-                    self.current_idx = self.playlist.index(current_file)
-                else:
-                    self.current_idx = 0 if self.playlist else -1
-            except Exception:
-                pass
-        # Alte History bereinigen um nicht mehr existierende Dateien
-        valid_set = set(self.playlist)
-        self.recent_history = [p for p in self.recent_history if p in valid_set]
-        self.history_back_stack = [p for p in self.history_back_stack if p in valid_set]
-        self.update_tray_tooltip()
-
-    def apply_wallpaper(self, filepath):
-        try:
-            ctypes.windll.user32.SystemParametersInfoW(
-                SPI_SETDESKWALLPAPER, 0, filepath,
-                SPIF_UPDATEINIFILE | SPIF_SENDCHANGE
-            )
-        except Exception:
-            pass
-
-    def trigger_next_manually(self):
-        if not self.playlist:
-            return
-        next_pic = self.select_next_wallpaper()
-        if next_pic:
-            if 0 <= self.current_idx < len(self.playlist):
-                curr_pic = self.playlist[self.current_idx]
-                self.history_back_stack.append(curr_pic)
-                if len(self.history_back_stack) > 50:
-                    self.history_back_stack.pop(0)
-
-            self.current_idx = self.playlist.index(next_pic)
-            self.recent_history.append(next_pic)
-            max_hist = max(50, int(self.config.get("Cooldown", 9)) * 2)
-            if len(self.recent_history) > max_hist:
-                self.recent_history = self.recent_history[-max_hist:]
-
-            self.apply_wallpaper(next_pic)
-            self.update_tray_tooltip()
-            self.start_timer()
-
-    def trigger_prev_manually(self):
-        if not self.playlist:
-            return
-        # Falls History vorhanden ist, zurückspringen
-        if self.history_back_stack:
-            prev_pic = self.history_back_stack.pop()
-            if prev_pic in self.playlist:
-                self.current_idx = self.playlist.index(prev_pic)
-                self.recent_history.append(prev_pic)
-                self.apply_wallpaper(prev_pic)
-                self.update_tray_tooltip()
-                self.start_timer()
-                return
-
-        # Fallback auf einfaches Zurückblättern
-        prev_idx = (self.current_idx - 1 + len(self.playlist)) % len(self.playlist)
-        self.current_idx = prev_idx
-        prev_pic = self.playlist[self.current_idx]
-        self.recent_history.append(prev_pic)
-        self.apply_wallpaper(prev_pic)
-        self.update_tray_tooltip()
-        self.start_timer()
-
-    def toggle_pause(self):
-        self.is_paused = not self.is_paused
-        if self.is_paused:
-            self.stop_timer()
-        else:
-            self.start_timer()
-        self.update_tray_tooltip()
-
     def trim_memory(self):
         """Gibt ungenutzte Heap-Pages an das Betriebssystem zurück."""
         try:
-            ctypes.windll.psapi.EmptyWorkingSet(ctypes.windll.kernel32.GetCurrentProcess())
+            ctypes.windll.psapi.EmptyWorkingSet(kernel32.GetCurrentProcess())
         except Exception:
             pass
 
     def shutdown(self):
+        if self.is_shutting_down:
+            return
+        self.is_shutting_down = True
         self.stop_timer()
         if self.h_power_notify:
             try:
-                ctypes.windll.user32.UnregisterPowerSettingNotification(self.h_power_notify)
+                user32.UnregisterPowerSettingNotification(self.h_power_notify)
             except Exception:
                 pass
+            self.h_power_notify = None
         try:
             ctypes.windll.wtsapi32.WTSUnRegisterSessionNotification(self.msg_hwnd)
         except Exception:
@@ -714,8 +871,11 @@ class SlideshowService:
             win32gui.DestroyWindow(self.msg_hwnd)
         except Exception:
             pass
+        try:
+            self.wallpaper_mgr.cleanup()
+        except Exception:
+            pass
         win32gui.PostQuitMessage(0)
-        sys.exit(0)
 
     def run(self):
         # 100% blockierender Kernel-Wait ohne Polling-Schleife:
@@ -732,15 +892,35 @@ if __name__ == '__main__':
             pass
 
         found = False
-        for cname in ("WallpaperSlideshow_UltraHost_v8", "WallpaperSlideshow_UltraHost_v6"):
+        for cname in ("WallpaperSlideshow_NativeHost_v9", "WallpaperSlideshow_UltraHost_v8", "WallpaperSlideshow_UltraHost_v6"):
             hwnd = win32gui.FindWindow(cname, "WallpaperSlideshowMsg")
             if hwnd:
                 win32gui.PostMessage(hwnd, win32con.WM_CLOSE, 0, 0)
                 found = True
+
         if not found:
             hwnd = win32gui.FindWindow(None, "WallpaperSlideshowMsg")
             if hwnd:
                 win32gui.PostMessage(hwnd, win32con.WM_CLOSE, 0, 0)
+                found = True
+
+        if not found:
+            hwnds = []
+            def enum_cb(h, _):
+                try:
+                    cname = win32gui.GetClassName(h)
+                    text = win32gui.GetWindowText(h)
+                    if "WallpaperSlideshow" in cname or text == "WallpaperSlideshowMsg":
+                        hwnds.append(h)
+                except Exception:
+                    pass
+                return True
+            try:
+                win32gui.EnumWindows(enum_cb, None)
+            except Exception:
+                pass
+            for h in hwnds:
+                win32gui.PostMessage(h, win32con.WM_CLOSE, 0, 0)
                 found = True
 
         if found:
@@ -754,5 +934,11 @@ if __name__ == '__main__':
             print("Keine aktive WallpaperSlideshow gefunden.")
         sys.exit(0)
 
-    service = SlideshowService()
-    service.run()
+    try:
+        service = SlideshowService()
+        service.run()
+    except Exception as e:
+        import traceback
+        with open(os.path.join(APP_DIR, "crash_log.txt"), "w", encoding="utf-8") as f:
+            traceback.print_exc(file=f)
+        raise

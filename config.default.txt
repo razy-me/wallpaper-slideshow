@@ -2,18 +2,19 @@
 # Wallpaper Slideshow Konfiguration
 # ==========================================
 
-# Pfad zum Bilderordner (nur Dateien direkt in diesem Ordner):
-# Standardmaessig: Ordner "Wallpapers" im Programmverzeichnis
+# Pfad zum Bilderordner:
+# Standardmaessig: Ordner "Wallpapers" im Programmverzeichnis (funktioniert portabel auf jedem PC)
+# Kann auch ein absoluter Pfad sein (z. B. C:\Bilder\Wallpapers)
 PicturesPath=Wallpapers
 
-# Anzeigedauer pro Bild in Sekunden (z. B. 30):
-IntervalSeconds=30
+# Anzeigedauer pro Bild in Sekunden (z. B. 15):
+IntervalSeconds=15
 
 # Bilder zufaellig mischen (true/false):
 Shuffle=true
 
-# Cooldown: Mindestanzahl anderer Bilder vor Wiederholung (z. B. 9):
-Cooldown=9
+# Diashow automatisch pausieren, wenn ein Spiel oder eine Praesentation im Vollbild laeuft (true/false):
+PauseOnFullscreen=true
 
 # Diashow automatisch pausieren, wenn Windows im Akku-Stromsparmodus ist (true/false):
 # Kann auch jederzeit per Rechtsklick auf das Tray-Icon ein-/ausgeschaltet werden!
