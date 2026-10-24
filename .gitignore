@@ -1,0 +1,12 @@
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.vscode/
+.idea/
+
+# Local active config (keep config.default.txt in git)
+config.txt
+
+# Binary / build artifacts
+*.exe
