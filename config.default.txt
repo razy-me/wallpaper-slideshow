@@ -19,3 +19,7 @@ PauseOnFullscreen=true
 # Diashow automatisch pausieren, wenn Windows im Akku-Stromsparmodus ist (true/false):
 # Kann auch jederzeit per Rechtsklick auf das Tray-Icon ein-/ausgeschaltet werden!
 PauseOnBatterySaver=false
+
+# Ultrabook-Power: Automatisch pausieren, sobald das Laptop auf reinem Akkubetrieb laeuft (true/false):
+# Kann auch jederzeit per Rechtsklick auf das Tray-Icon ein-/ausgeschaltet werden!
+PauseOnBattery=false

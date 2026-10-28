@@ -1,12 +1,13 @@
-__pycache__/
-*.pyc
-*.pyo
-*.pyd
-.vscode/
-.idea/
+# Build & Binary
+*.exe
+*.o
+*.obj
+*.res
 
-# Local active config (keep config.default.txt in git)
+# Local active config
 config.txt
 
-# Binary / build artifacts
-*.exe
+# Editor / OS
+.vscode/
+.idea/
+*.log
