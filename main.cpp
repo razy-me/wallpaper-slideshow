@@ -19,12 +19,14 @@
 #include <algorithm>
 #include <cwchar>
 
+#if defined(_MSC_VER)
 #pragma comment(lib, "user32.lib")
 #pragma comment(lib, "shell32.lib")
 #pragma comment(lib, "ole32.lib")
 #pragma comment(lib, "advapi32.lib")
 #pragma comment(lib, "wtsapi32.lib")
 #pragma comment(lib, "psapi.lib")
+#endif
 
 // --- Constants & Messages ---
 #define TRAY_MSG_ID (WM_USER + 42)
@@ -173,6 +175,11 @@ public:
             candidate = raw;
         } else {
             candidate = m_appDir + L"\\" + raw;
+        }
+
+        WCHAR canonical[MAX_PATH];
+        if (GetFullPathNameW(candidate.c_str(), MAX_PATH, canonical, nullptr)) {
+            candidate = canonical;
         }
 
         DWORD attr = GetFileAttributesW(candidate.c_str());
@@ -352,8 +359,9 @@ public:
                     }
                 }
                 return;
+            } else {
+                CloseHandle(hFile);
             }
-            CloseHandle(hFile);
         }
         // If not found or empty, save default
         saveConfig();
@@ -706,12 +714,6 @@ public:
     }
 
     bool init() {
-        HDESK hDesk = OpenInputDesktop(0, FALSE, MAXIMUM_ALLOWED);
-        if (hDesk) {
-            SetThreadDesktop(hDesk);
-            CloseDesktop(hDesk);
-        }
-
         // 1. EcoQoS / Effizienzmodus
         applyEcoMode();
 
